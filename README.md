@@ -123,5 +123,10 @@ auto_refund	Автовозврат при ошибках	| Boolean
 stats	Статистика (автоматически)| Object
 pyrogram	Настройки Pyrogram | Object
 
+ДОНАТ 
+TON: UQBNtmJU2OQ7iDbz9ngl8zYD_JFSoQTvbJ3q3pXSK3iGiMf3
+ETH: 0x83Ca50C7D33aD6E086d386B1F6dB2908a1d158f1
+TRX: TEkxC7hNTR4iVqiGEy3XEc8tzkGGaB3FSR
+
 
 

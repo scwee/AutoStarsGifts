@@ -13,7 +13,7 @@ import time
 import threading
 from queue import Queue
 from FunPayAPI.updater.events import NewOrderEvent, NewMessageEvent
-from FunPayAPI.types.enums import OrderStatuses
+from FunPayAPI.updater.events import OrderStatuses
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from telebot import types
 

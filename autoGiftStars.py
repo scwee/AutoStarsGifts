@@ -9,12 +9,8 @@ import asyncio
 import random
 import json
 import os
-import time
-import threading
-from queue import Queue
-from FunPayAPI.updater.events import NewOrderEvent, NewMessageEvent, OrderStatuses
+from FunPayAPI.updater.events import NewOrderEvent, NewMessageEvent
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from telebot import types
 
 try:
     from pyrogram import Client
@@ -26,11 +22,11 @@ except ImportError:
     from pyrogram import Client
 
 # ═══════════════════════════════════════════════════════════════════════════
-# МЕТАДАННЫЕ ПЛАГИНА
+# МЕТАДАННЫЕ
 # ═══════════════════════════════════════════════════════════════════════════
 
 NAME = "StarsGifter"
-VERSION = "2.2"
+VERSION = "3.1(С божьей помощью работай, умоляю)"
 DESCRIPTION = "Плагин для отправки звёзд через подарки Telegram"
 CREDITS = "@Scwee_xz"
 UUID = "298845c5-9c90-4912-b599-7ca26f94a7b1"
@@ -46,7 +42,6 @@ DEFAULT_CONFIG = {
         "15": [5170145012310081615, 5170233102089322756]
     },
     "plugin_enabled": True,
-    "stats": {},
     "pyrogram": {
         "api_id": 0,
         "api_hash": "",
@@ -72,7 +67,6 @@ FUNPAY_STATES = {}
 # ═══════════════════════════════════════════════════════════════════════════
 
 def load_config():
-    """Загрузить конфиг"""
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     if not os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -81,7 +75,6 @@ def load_config():
         return json.load(f)
 
 def save_config(cfg):
-    """Сохранить конфиг"""
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(cfg, f, indent=4, ensure_ascii=False)
 
@@ -91,11 +84,10 @@ RANDOM_GIFTS = {int(k): v for k, v in config.get("random_gifts", DEFAULT_CONFIG[
 RUNNING = config.get("plugin_enabled", True)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PYROGRAM КЛИЕНТ
+# PYROGRAM
 # ═══════════════════════════════════════════════════════════════════════════
 
 def init_pyrogram():
-    """Инициализировать Pyrogram"""
     global pyrogram_client
     pyrogram_config = config.get("pyrogram", DEFAULT_CONFIG["pyrogram"])
     
@@ -111,7 +103,7 @@ def init_pyrogram():
             phone_number=pyrogram_config.get("phone_number", "")
         )
         pyrogram_client.start()
-        logger.info(f"{LOGGER_PREFIX} ✅ Pyrogram клиент запущен")
+        logger.info(f"{LOGGER_PREFIX} ✅ Pyrogram запущен")
         return True
     except Exception as e:
         logger.error(f"{LOGGER_PREFIX} ❌ Ошибка Pyrogram: {e}")
@@ -122,7 +114,7 @@ def init_pyrogram():
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def calc_gifts_quantity(quantity):
-    """Расчёт комбинации подарков"""
+    """Расчёт подарков"""
     for d in range(quantity // 100, -1, -1):
         remain_after_100 = quantity - d * 100
         for c in range(remain_after_100 // 50, -1, -1):
@@ -135,7 +127,7 @@ async def calc_gifts_quantity(quantity):
     return None
 
 def format_gifts_result(gifts_dict):
-    """Форматирование результата подарков"""
+    """Форматирование подарков"""
     result = []
     for price, count in sorted(gifts_dict.items(), reverse=True):
         if count > 0:
@@ -152,12 +144,12 @@ async def send_stars_gifts(cardinal, username, stars_count, chat_id, order_id=No
     global pyrogram_client
     try:
         if pyrogram_client is None or not pyrogram_client.is_connected:
-            cardinal.account.send_message(chat_id, "❌ Ошибка: клиент Telegram не подключен")
+            cardinal.account.send_message(chat_id, "❌ Клиент Telegram не подключен")
             return False
 
         gifts_distribution = await calc_gifts_quantity(stars_count)
         if not gifts_distribution:
-            cardinal.account.send_message(chat_id, "❌ Ошибка: невозможно рассчитать подарки")
+            cardinal.account.send_message(chat_id, "❌ Ошибка расчёта подарков")
             return False
 
         try:
@@ -186,17 +178,17 @@ async def send_stars_gifts(cardinal, username, stars_count, chat_id, order_id=No
 
         report = f"✅ Отправлено: {stars_count} stars\n\n" + format_gifts_result(gifts_distribution)
         if failed_count > 0:
-            report += f"\n\n❌ Не удалось отправить: {failed_count}"
+            report += f"\n\n❌ Не удалось: {failed_count}"
 
         cardinal.account.send_message(chat_id, report)
 
         if failed_count == 0:
             review_msg = (
-                "✅ Звезды были успешно отправлены вам на аккаунт через подарок!\n\n"
-                "❤️ Подтвердите пожалуйста заказ и напишите отзыв, вам не сложно, а мне это очень сильно поможет."
+                "✅ Звезды отправлены на ваш аккаунт!\n\n"
+                "❤️ Подтвердите заказ и напишите отзыв."
             )
             if order_id:
-                review_msg += f"\n✨ Ссылка для написания отзыва: https://funpay.com/orders/{order_id}/"
+                review_msg += f"\n✨ https://funpay.com/orders/{order_id}/"
             cardinal.account.send_message(chat_id, review_msg)
         
         return True
@@ -207,109 +199,104 @@ async def send_stars_gifts(cardinal, username, stars_count, chat_id, order_id=No
         return False
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ОБРАБОТКА ЗАКАЗОВ
+# ОБРАБОТКА НОВЫХ ЗАКАЗОВ (BIND_TO_NEW_ORDER)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def extract_order_id_from_message(text: str):
-    """Извлечение ID заказа из сообщения"""
-    import re
-    match = re.search(r'#(\w+)', text)
-    return match.group(1) if match else None
-
-def handle_new_message(cardinal, event: NewMessageEvent, *args):
-    """Обработка новых сообщений - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
-    global FUNPAY_STATES, RUNNING
-
+def handle_new_order(cardinal, event: NewOrderEvent, *args):
+    """Обработка нового заказа - ОСНОВНАЯ ФУНКЦИЯ"""
+    global RUNNING
+    
     if not RUNNING:
         return
+    
+    try:
+        order = event.order
+        order_id = order.id
+        chat_id = order.chat_id
+        buyer_id = order.buyer_id
+        lot_id = str(order.lot_id) if hasattr(order, 'lot_id') else None
+        
+        logger.info(f"{LOGGER_PREFIX} 📦 Новый заказ #{order_id} | Лот: {lot_id}")
+        
+        # Проверка лота
+        if not lot_id or lot_id not in LOT_STARS_MAPPING:
+            logger.warning(f"{LOGGER_PREFIX} ⚠️ Лот {lot_id} не в маппинге")
+            return
+        
+        # Расчет звёзд
+        stars_per_lot = LOT_STARS_MAPPING[lot_id]
+        amount = order.amount if hasattr(order, 'amount') else 1
+        total_stars = stars_per_lot * amount
+        
+        # Проверка количества
+        if amount != 1:
+            cardinal.account.send_message(
+                chat_id, 
+                f"❌ Заказали {amount} лотов ({total_stars} Stars). По одному!"
+            )
+            logger.warning(f"{LOGGER_PREFIX} ⚠️ Заказ #{order_id} - неверное кол-во ({amount})")
+            return
+        
+        # Отправить приветствие
+        welcome_msg = (
+            f"✨ Спасибо за заказ {total_stars} Stars!\n\n"
+            f"Отправьте ваш username Telegram:\n"
+            f"• @username\n• username\n• ID пользователя"
+        )
+        
+        cardinal.account.send_message(chat_id, welcome_msg)
+        
+        # Сохранить состояние
+        state_key = (chat_id, buyer_id)
+        FUNPAY_STATES[state_key] = {
+            "state": "waiting_for_username",
+            "data": {
+                "order_id": order_id,
+                "chat_id": chat_id,
+                "stars_count": total_stars
+            }
+        }
+        
+        logger.info(f"{LOGGER_PREFIX} ✅ Заказ #{order_id} обработан. Ожидаю username")
+    
+    except Exception as e:
+        logger.error(f"{LOGGER_PREFIX} ❌ Ошибка обработки заказа: {e}")
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ОБРАБОТКА СООБЩЕНИЙ (ДИАЛОГ С ПОЛЬЗОВАТЕЛЕМ)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def handle_new_message(cardinal, event: NewMessageEvent, *args):
+    """Обработка сообщений от пользователя"""
+    global FUNPAY_STATES, RUNNING
+    
+    if not RUNNING:
+        return
+    
     message = event.message
     state_key = (message.chat_id, message.author_id)
     state = FUNPAY_STATES.get(state_key)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # ОБРАБОТКА НОВОЙ ПОКУПКИ
-    # ═══════════════════════════════════════════════════════════════════════════
-    if message.author_id == 0 and message.type and message.type.name == "ORDER_PURCHASED":
-        order_id = extract_order_id_from_message(message.text)
-        
-        if order_id:
-            try:
-                # ПОЛУЧАЕМ ИНФОРМАЦИЮ О ЗАКАЗЕ СРАЗУ (ПОК А ОН СВЕЖИЙ)
-                order = cardinal.account.get_order(order_id)
-                
-                if not order:
-                    logger.warning(f"{LOGGER_PREFIX} ❌ Не удалось получить заказ #{order_id}")
-                    return
-                
-                # Получаем ID лота
-                lot_id = str(order.lot_id) if hasattr(order, 'lot_id') else None
-                amount = order.amount if hasattr(order, 'amount') else 1
-                
-                logger.info(f"{LOGGER_PREFIX} ✅ Новый заказ #{order_id} | Лот: {lot_id} | Кол-во: {amount}")
-                
-                # Проверяем лот в маппинге
-                if not lot_id or lot_id not in LOT_STARS_MAPPING:
-                    logger.warning(f"{LOGGER_PREFIX} ⚠️ Лот {lot_id} не найден в маппинге")
-                    return
-                
-                # Расчитываем звёзды
-                stars_per_lot = LOT_STARS_MAPPING[lot_id]
-                total_stars = stars_per_lot * amount
-                
-                # Проверяем что заказ один
-                if amount != 1:
-                    cardinal.account.send_message(
-                        message.chat_id, 
-                        f"❌ Вы заказали {amount} лотов ({total_stars} Stars). Заказывайте по одному!"
-                    )
-                    logger.warning(f"{LOGGER_PREFIX} ⚠️ Заказ #{order_id} - неверное кол-во ({amount})")
-                    return
-                
-                # ОТПРАВЛЯЕМ ПРИВЕТСТВИЕ СРАЗУ
-                welcome_msg = (
-                    f"✨ Спасибо за заказ {total_stars} Stars!\n\n"
-                    f"Для отправки звёзд мне нужен ваш username Telegram.\n"
-                    f"Пожалуйста, отправьте его в любом формате:\n"
-                    f"• @username\n• username\n• ID пользователя"
-                )
-                
-                cardinal.account.send_message(message.chat_id, welcome_msg)
-                
-                # СОХРАНЯЕМ СОСТОЯНИЕ С ПОЛНОЙ ИНФОРМАЦИЕЙ О ЗАКАЗЕ
-                FUNPAY_STATES[state_key] = {
-                    "state": "waiting_for_username",
-                    "data": {
-                        "order_id": order_id,
-                        "chat_id": message.chat_id,
-                        "stars_count": total_stars
-                    }
-                }
-                
-                logger.info(f"{LOGGER_PREFIX} ✅ Заказ #{order_id} готов - ожидаю username")
-                return
-            
-            except Exception as e:
-                logger.error(f"{LOGGER_PREFIX} ❌ Ошибка при получении заказа #{order_id}: {e}")
-                return
-
+    
+    if not state:
+        return
+    
     # ═══════════════════════════════════════════════════════════════════════════
     # ОЖИДАНИЕ USERNAME
     # ═══════════════════════════════════════════════════════════════════════════
-    if state and state["state"] == "waiting_for_username":
+    if state["state"] == "waiting_for_username":
         username = message.text.strip()
         order_id = state["data"]["order_id"]
         stars_count = state["data"]["stars_count"]
-
+        
         if not username:
             cardinal.account.send_message(message.chat_id, "❌ Отправьте username")
             return
-
-        # Запрашиваем подтверждение
+        
+        # Запросить подтверждение
         cardinal.account.send_message(
             message.chat_id,
-            f"• Проверьте данные:\nL Username: {username}\nL Количество звёзд: {stars_count}\n\n"
-            f"• Если всё верно, отправьте «+» без кавычек\nL Либо отправьте новый username"
+            f"✓ Проверьте данные:\n• Username: {username}\n• Звёзды: {stars_count}\n\n"
+            f"Отправьте «+» для подтверждения или новый username"
         )
         
         FUNPAY_STATES[state_key] = {
@@ -322,33 +309,31 @@ def handle_new_message(cardinal, event: NewMessageEvent, *args):
             }
         }
         return
-
+    
     # ═══════════════════════════════════════════════════════════════════════════
     # ПОДТВЕРЖДЕНИЕ USERNAME
     # ═══════════════════════════════════════════════════════════════════════════
-    if state and state["state"] == "confirming_username":
+    if state["state"] == "confirming_username":
         order_id = state["data"]["order_id"]
         response = message.text.strip().lower()
-
+        
         if response in ["+", "да", "yes", "верно", "confirm"]:
-            # ПОДТВЕРЖДЕНО - НАЧИНАЕМ ОТПРАВКУ
+            # ПОДТВЕРЖДЕНО - ОТПРАВЛЯЕМ
             username = state["data"]["username"]
             stars_count = state["data"]["stars_count"]
             chat_id = state["data"]["chat_id"]
             
-            cardinal.account.send_message(chat_id, f"🚀 Начинаю отправку {stars_count} звёзд...")
+            cardinal.account.send_message(chat_id, f"🚀 Отправляю {stars_count} звёзд...")
             
-            logger.info(f"{LOGGER_PREFIX} 📤 Начинаю отправку заказа #{order_id}")
-            logger.info(f"{LOGGER_PREFIX} Username: {username} | Звёзды: {stars_count}")
+            logger.info(f"{LOGGER_PREFIX} 📤 Отправка #{order_id} | {username} | {stars_count}★")
             
-            # Выполняем отправку
             asyncio.run(send_stars_gifts(cardinal, username, stars_count, chat_id, order_id))
             
             logger.info(f"{LOGGER_PREFIX} ✅ Заказ #{order_id} завершён!")
             FUNPAY_STATES.pop(state_key, None)
         
         elif response in ["-", "нет", "no"]:
-            # ОТМЕНЕНО - ЗАПРАШИВАЕМ НОВЫЙ USERNAME
+            # ОТМЕНА - НОВЫЙ USERNAME
             FUNPAY_STATES[state_key] = {
                 "state": "waiting_for_username",
                 "data": {
@@ -357,15 +342,15 @@ def handle_new_message(cardinal, event: NewMessageEvent, *args):
                     "chat_id": state["data"]["chat_id"]
                 }
             }
-            cardinal.account.send_message(message.chat_id, "🔄 Введите корректный username")
+            cardinal.account.send_message(message.chat_id, "🔄 Отправьте новый username")
         
         else:
-            # НОВЫЙ USERNAME
+            # ДРУГОЙ USERNAME
             new_username = message.text.strip()
             cardinal.account.send_message(
                 message.chat_id,
-                f"• Проверьте данные:\nL Username: {new_username}\nL Количество звёзд: {state['data']['stars_count']}\n\n"
-                f"• Если всё верно, отправьте «+» без кавычек\nL Либо отправьте новый username"
+                f"✓ Проверьте:\n• Username: {new_username}\n• Звёзды: {state['data']['stars_count']}\n\n"
+                f"Отправьте «+» или новый username"
             )
             
             FUNPAY_STATES[state_key] = {
@@ -379,11 +364,10 @@ def handle_new_message(cardinal, event: NewMessageEvent, *args):
             }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TELEGRAM ПАНЕЛЬ (4 КНОПКИ)
+# TELEGRAM ПАНЕЛЬ
 # ═══════════════════════════════════════════════════════════════════════════
 
 def show_simple_panel(cardinal, chat_id: int):
-    """Простая панель управления"""
     keyboard = InlineKeyboardMarkup(row_width=2)
     
     status = "🟢 ВКЛЮЧЕН" if RUNNING else "🔴 ВЫКЛЮЧЕН"
@@ -402,35 +386,23 @@ def show_simple_panel(cardinal, chat_id: int):
 ⚡ <b>StarsGifter v{VERSION}</b>
 
 📊 <b>Статус:</b> {status}
-⚙️ <b>API ID:</b> {'✅ Установлен' if config.get('pyrogram', {}).get('api_id') else '❌ Не установлен'}
+⚙️ <b>API ID:</b> {'✅' if config.get('pyrogram', {}).get('api_id') else '❌'}
 📌 <b>Лотов:</b> {lots_count}
 """
     
-    cardinal.telegram.bot.send_message(
-        chat_id, 
-        text, 
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    cardinal.telegram.bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
 
 def setup_simple_callbacks(cardinal):
-    """Обработчики кнопок"""
     global RUNNING
     
     @cardinal.telegram.bot.callback_query_handler(func=lambda c: c.data == "show_status")
     def show_status_btn(call):
         status = "🟢 ВКЛЮЧЕН" if RUNNING else "🔴 ВЫКЛЮЧЕН"
-        api_status = "✅ Установлен" if config.get('pyrogram', {}).get('api_id') else "❌ Не установлен"
+        api_id_ok = "✅" if config.get('pyrogram', {}).get('api_id') else "❌"
+        api_hash_ok = "✅" if config.get('pyrogram', {}).get('api_hash') else "❌"
         lots = len(LOT_STARS_MAPPING)
         
-        info = f"""
-<b>📊 Информация о плагине</b>
-
-• Статус: {status}
-• API ID: {api_status}
-• API HASH: {'✅ Установлен' if config.get('pyrogram', {}).get('api_hash') else '❌ Не установлен'}
-• Лотов настроено: {lots}
-"""
+        info = f"<b>📊 Информация</b>\n\n• Статус: {status}\n• API ID: {api_id_ok}\n• API HASH: {api_hash_ok}\n• Лотов: {lots}"
         cardinal.telegram.bot.send_message(call.message.chat.id, info, parse_mode="HTML")
     
     @cardinal.telegram.bot.callback_query_handler(func=lambda c: c.data == "toggle")
@@ -440,83 +412,56 @@ def setup_simple_callbacks(cardinal):
         config["plugin_enabled"] = RUNNING
         save_config(config)
         
-        status = "✅ ВКЛЮЧЕН" if RUNNING else "❌ ВЫКЛЮЧЕН"
+        status = "✅" if RUNNING else "❌"
         cardinal.telegram.bot.answer_callback_query(call.id, f"Плагин {status}", show_alert=True)
-        
         cardinal.telegram.bot.delete_message(call.message.chat.id, call.message.message_id)
         show_simple_panel(cardinal, call.message.chat.id)
     
     @cardinal.telegram.bot.callback_query_handler(func=lambda c: c.data == "set_api")
     def set_api_btn(call):
         keyboard = InlineKeyboardMarkup(row_width=1)
-        keyboard.add(InlineKeyboardButton("📝 Ввести API ID", callback_data="input_api_id"))
-        keyboard.add(InlineKeyboardButton("📝 Ввести API HASH", callback_data="input_api_hash"))
+        keyboard.add(InlineKeyboardButton("📝 API ID", callback_data="input_api_id"))
+        keyboard.add(InlineKeyboardButton("📝 API HASH", callback_data="input_api_hash"))
         keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_to_main"))
-        
-        cardinal.telegram.bot.send_message(
-            call.message.chat.id,
-            "⚙️ <b>Настройка API</b>\n\nВыберите что хотите изменить:",
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
+        cardinal.telegram.bot.send_message(call.message.chat.id, "⚙️ <b>API</b>", reply_markup=keyboard, parse_mode="HTML")
     
     @cardinal.telegram.bot.callback_query_handler(func=lambda c: c.data == "input_api_id")
     def input_api_id_btn(call):
-        msg = cardinal.telegram.bot.send_message(
-            call.message.chat.id,
-            "📝 Отправьте ваш API ID (числа):"
-        )
+        msg = cardinal.telegram.bot.send_message(call.message.chat.id, "📝 API ID:")
         cardinal.telegram.bot.register_next_step_handler(msg, process_api_id, cardinal)
     
     @cardinal.telegram.bot.callback_query_handler(func=lambda c: c.data == "input_api_hash")
     def input_api_hash_btn(call):
-        msg = cardinal.telegram.bot.send_message(
-            call.message.chat.id,
-            "📝 Отправьте ваш API HASH (буквы и цифры):"
-        )
+        msg = cardinal.telegram.bot.send_message(call.message.chat.id, "📝 API HASH:")
         cardinal.telegram.bot.register_next_step_handler(msg, process_api_hash, cardinal)
     
     @cardinal.telegram.bot.callback_query_handler(func=lambda c: c.data == "manage_lots")
     def manage_lots_btn(call):
         keyboard = InlineKeyboardMarkup(row_width=1)
-        keyboard.add(InlineKeyboardButton("➕ Добавить лот", callback_data="add_lot"))
-        keyboard.add(InlineKeyboardButton("➖ Удалить лот", callback_data="remove_lot"))
-        keyboard.add(InlineKeyboardButton("📋 Показать все", callback_data="show_lots"))
+        keyboard.add(InlineKeyboardButton("➕ Добавить", callback_data="add_lot"))
+        keyboard.add(InlineKeyboardButton("➖ Удалить", callback_data="remove_lot"))
+        keyboard.add(InlineKeyboardButton("📋 Показать", callback_data="show_lots"))
         keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_to_main"))
-        
-        cardinal.telegram.bot.send_message(
-            call.message.chat.id,
-            f"📌 <b>Управление лотами</b>\n\nВсего лотов: {len(LOT_STARS_MAPPING)}",
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
+        cardinal.telegram.bot.send_message(call.message.chat.id, f"📌 <b>Лоты ({len(LOT_STARS_MAPPING)})</b>", reply_markup=keyboard, parse_mode="HTML")
     
     @cardinal.telegram.bot.callback_query_handler(func=lambda c: c.data == "add_lot")
     def add_lot_btn(call):
-        msg = cardinal.telegram.bot.send_message(
-            call.message.chat.id,
-            "📝 Отправьте ID лота и количество звёзд в формате:\n\n<code>123456 100</code>\n\nГде:\n• 123456 - ID лота\n• 100 - количество звёзд",
-            parse_mode="HTML"
-        )
+        msg = cardinal.telegram.bot.send_message(call.message.chat.id, "Формат: <code>123456 100</code>", parse_mode="HTML")
         cardinal.telegram.bot.register_next_step_handler(msg, process_add_lot, cardinal)
     
     @cardinal.telegram.bot.callback_query_handler(func=lambda c: c.data == "remove_lot")
     def remove_lot_btn(call):
-        msg = cardinal.telegram.bot.send_message(
-            call.message.chat.id,
-            "📝 Отправьте ID лота для удаления:"
-        )
+        msg = cardinal.telegram.bot.send_message(call.message.chat.id, "ID лота:")
         cardinal.telegram.bot.register_next_step_handler(msg, process_remove_lot, cardinal)
     
     @cardinal.telegram.bot.callback_query_handler(func=lambda c: c.data == "show_lots")
     def show_lots_btn(call):
         if not LOT_STARS_MAPPING:
-            text = "❌ Нет добавленных лотов"
+            text = "❌ Пусто"
         else:
-            text = "<b>📌 Список лотов:</b>\n\n"
+            text = "<b>📌 Лоты:</b>\n\n"
             for lot_id, stars in LOT_STARS_MAPPING.items():
-                text += f"• Лот <code>{lot_id}</code> → <b>{stars}⭐</b>\n"
-        
+                text += f"• <code>{lot_id}</code> → <b>{stars}⭐</b>\n"
         cardinal.telegram.bot.send_message(call.message.chat.id, text, parse_mode="HTML")
     
     @cardinal.telegram.bot.callback_query_handler(func=lambda c: c.data == "back_to_main")
@@ -524,102 +469,49 @@ def setup_simple_callbacks(cardinal):
         cardinal.telegram.bot.delete_message(call.message.chat.id, call.message.message_id)
         show_simple_panel(cardinal, call.message.chat.id)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# ОБРАБОТЧИКИ ВВОДОВ
-# ═══════════════════════════════════════════════════════════════════════════
-
 def process_api_id(message, cardinal):
-    """Обработка API ID"""
     try:
         api_id = int(message.text.strip())
         config["pyrogram"]["api_id"] = api_id
         save_config(config)
-        
-        cardinal.telegram.bot.send_message(
-            message.chat.id,
-            f"✅ <b>API ID сохранён:</b> <code>{api_id}</code>",
-            parse_mode="HTML"
-        )
-    except ValueError:
-        cardinal.telegram.bot.send_message(
-            message.chat.id,
-            "❌ Ошибка! API ID должен быть числом"
-        )
+        cardinal.telegram.bot.send_message(message.chat.id, f"✅ API ID: <code>{api_id}</code>", parse_mode="HTML")
+    except:
+        cardinal.telegram.bot.send_message(message.chat.id, "❌ Ошибка")
 
 def process_api_hash(message, cardinal):
-    """Обработка API HASH"""
     api_hash = message.text.strip()
-    
-    if len(api_hash) < 10:
-        cardinal.telegram.bot.send_message(
-            message.chat.id,
-            "❌ Ошибка! API HASH слишком короткий"
-        )
-        return
-    
     config["pyrogram"]["api_hash"] = api_hash
     save_config(config)
-    
-    cardinal.telegram.bot.send_message(
-        message.chat.id,
-        f"✅ <b>API HASH сохранён:</b> <code>{api_hash[:10]}...</code>",
-        parse_mode="HTML"
-    )
+    cardinal.telegram.bot.send_message(message.chat.id, f"✅ API HASH: <code>{api_hash[:10]}...</code>", parse_mode="HTML")
 
 def process_add_lot(message, cardinal):
-    """Добавить лот"""
     try:
         parts = message.text.strip().split()
-        if len(parts) != 2:
-            raise ValueError("Неверный формат")
-        
         lot_id = parts[0]
         stars = int(parts[1])
-        
         LOT_STARS_MAPPING[lot_id] = stars
         config["lot_stars_mapping"][lot_id] = stars
         save_config(config)
-        
-        cardinal.telegram.bot.send_message(
-            message.chat.id,
-            f"✅ <b>Лот добавлен!</b>\n\n• ID: <code>{lot_id}</code>\n• Звёзды: <b>{stars}⭐</b>",
-            parse_mode="HTML"
-        )
+        cardinal.telegram.bot.send_message(message.chat.id, f"✅ Лот <code>{lot_id}</code> → <b>{stars}⭐</b>", parse_mode="HTML")
     except:
-        cardinal.telegram.bot.send_message(
-            message.chat.id,
-            "❌ Ошибка! Используйте формат: <code>123456 100</code>",
-            parse_mode="HTML"
-        )
+        cardinal.telegram.bot.send_message(message.chat.id, "❌ Ошибка")
 
 def process_remove_lot(message, cardinal):
-    """Удалить лот"""
     lot_id = message.text.strip()
-    
     if lot_id in LOT_STARS_MAPPING:
-        stars = LOT_STARS_MAPPING.pop(lot_id)
+        LOT_STARS_MAPPING.pop(lot_id)
         config["lot_stars_mapping"].pop(lot_id, None)
         save_config(config)
-        
-        cardinal.telegram.bot.send_message(
-            message.chat.id,
-            f"✅ <b>Лот удалён!</b>\n\n• ID: <code>{lot_id}</code>\n• Было: <b>{stars}⭐</b>",
-            parse_mode="HTML"
-        )
+        cardinal.telegram.bot.send_message(message.chat.id, f"✅ Лот удалён", parse_mode="HTML")
     else:
-        cardinal.telegram.bot.send_message(
-            message.chat.id,
-            f"❌ Лот <code>{lot_id}</code> не найден",
-            parse_mode="HTML"
-        )
+        cardinal.telegram.bot.send_message(message.chat.id, "❌ Не найден", parse_mode="HTML")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ИНИЦИАЛИЗАЦИЯ
 # ═══════════════════════════════════════════════════════════════════════════
 
 def init_plugin(cardinal):
-    """Инициализация плагина"""
-    logger.info(f"{LOGGER_PREFIX} 🚀 Инициализация {NAME} v{VERSION}")
+    logger.info(f"{LOGGER_PREFIX} 🚀 {NAME} v{VERSION}")
     init_pyrogram()
     
     @cardinal.telegram.bot.message_handler(commands=["stars_panel"])
@@ -627,17 +519,13 @@ def init_plugin(cardinal):
         show_simple_panel(cardinal, m.chat.id)
     
     setup_simple_callbacks(cardinal)
-    
-    handle_new_message.plugin_uuid = UUID
-    if handle_new_message not in cardinal.new_message_handlers:
-        cardinal.new_message_handlers.append(handle_new_message)
-    
-    logger.info(f"{LOGGER_PREFIX} ✅ Плагин загружен")
+    logger.info(f"{LOGGER_PREFIX} ✅ Загружен")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BIND POINTS (ОБЯЗАТЕЛЬНО)
+# BIND POINTS
 # ═══════════════════════════════════════════════════════════════════════════
 
 BIND_TO_PRE_INIT = [init_plugin]
+BIND_TO_NEW_ORDER = [handle_new_order]
 BIND_TO_NEW_MESSAGE = [handle_new_message]
 BIND_TO_DELETE = []

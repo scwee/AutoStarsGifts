@@ -12,8 +12,7 @@ import os
 import time
 import threading
 from queue import Queue
-from FunPayAPI.updater.events import NewOrderEvent, NewMessageEvent
-from FunPayAPI.updater.events import OrderStatuses
+from FunPayAPI.updater.events import NewOrderEvent, NewMessageEvent, OrderStatuses
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from telebot import types
 
@@ -31,7 +30,7 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════════════
 
 NAME = "StarsGifter"
-VERSION = "2.1"
+VERSION = "2.2"
 DESCRIPTION = "Плагин для отправки звёзд через подарки Telegram"
 CREDITS = "@Scwee_xz"
 UUID = "298845c5-9c90-4912-b599-7ca26f94a7b1"
@@ -66,7 +65,6 @@ LOGGER_PREFIX = "[StarsGifter]"
 
 RUNNING = True
 pyrogram_client = None
-USER_ORDER_QUEUES = {}
 FUNPAY_STATES = {}
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -212,15 +210,6 @@ async def send_stars_gifts(cardinal, username, stars_count, chat_id, order_id=No
 # ОБРАБОТКА ЗАКАЗОВ
 # ═══════════════════════════════════════════════════════════════════════════
 
-def verify_order_exists(cardinal: 'Cardinal', order_id: str) -> bool:
-    """Проверка подлинности заказа"""
-    try:
-        order = cardinal.account.get_order(order_id)
-        return order is not None and order.seller_id == cardinal.account.id
-    except Exception as e:
-        logger.error(f"{LOGGER_PREFIX} Ошибка проверки заказа #{order_id}: {e}")
-        return False
-
 def extract_order_id_from_message(text: str):
     """Извлечение ID заказа из сообщения"""
     import re
@@ -228,7 +217,7 @@ def extract_order_id_from_message(text: str):
     return match.group(1) if match else None
 
 def handle_new_message(cardinal, event: NewMessageEvent, *args):
-    """Обработка новых сообщений"""
+    """Обработка новых сообщений - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     global FUNPAY_STATES, RUNNING
 
     if not RUNNING:
@@ -238,45 +227,75 @@ def handle_new_message(cardinal, event: NewMessageEvent, *args):
     state_key = (message.chat_id, message.author_id)
     state = FUNPAY_STATES.get(state_key)
 
-    # Обработка системных сообщений о покупке
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ОБРАБОТКА НОВОЙ ПОКУПКИ
+    # ═══════════════════════════════════════════════════════════════════════════
     if message.author_id == 0 and message.type and message.type.name == "ORDER_PURCHASED":
         order_id = extract_order_id_from_message(message.text)
+        
         if order_id:
             try:
+                # ПОЛУЧАЕМ ИНФОРМАЦИЮ О ЗАКАЗЕ СРАЗУ (ПОК А ОН СВЕЖИЙ)
                 order = cardinal.account.get_order(order_id)
-                buyer_id = order.buyer_id
                 
-                USER_ORDER_QUEUES.setdefault(buyer_id, Queue()).put({
-                    "order_id": order_id,
-                    "chat_id": message.chat_id
-                })
+                if not order:
+                    logger.warning(f"{LOGGER_PREFIX} ❌ Не удалось получить заказ #{order_id}")
+                    return
                 
-                threading.Thread(
-                    target=process_user_orders,
-                    args=(cardinal, buyer_id),
-                    daemon=True
-                ).start()
+                # Получаем ID лота
+                lot_id = str(order.lot_id) if hasattr(order, 'lot_id') else None
+                amount = order.amount if hasattr(order, 'amount') else 1
                 
-                logger.info(f"{LOGGER_PREFIX} Заказ #{order_id} добавлен в очередь обработки")
+                logger.info(f"{LOGGER_PREFIX} ✅ Новый заказ #{order_id} | Лот: {lot_id} | Кол-во: {amount}")
+                
+                # Проверяем лот в маппинге
+                if not lot_id or lot_id not in LOT_STARS_MAPPING:
+                    logger.warning(f"{LOGGER_PREFIX} ⚠️ Лот {lot_id} не найден в маппинге")
+                    return
+                
+                # Расчитываем звёзды
+                stars_per_lot = LOT_STARS_MAPPING[lot_id]
+                total_stars = stars_per_lot * amount
+                
+                # Проверяем что заказ один
+                if amount != 1:
+                    cardinal.account.send_message(
+                        message.chat_id, 
+                        f"❌ Вы заказали {amount} лотов ({total_stars} Stars). Заказывайте по одному!"
+                    )
+                    logger.warning(f"{LOGGER_PREFIX} ⚠️ Заказ #{order_id} - неверное кол-во ({amount})")
+                    return
+                
+                # ОТПРАВЛЯЕМ ПРИВЕТСТВИЕ СРАЗУ
+                welcome_msg = (
+                    f"✨ Спасибо за заказ {total_stars} Stars!\n\n"
+                    f"Для отправки звёзд мне нужен ваш username Telegram.\n"
+                    f"Пожалуйста, отправьте его в любом формате:\n"
+                    f"• @username\n• username\n• ID пользователя"
+                )
+                
+                cardinal.account.send_message(message.chat_id, welcome_msg)
+                
+                # СОХРАНЯЕМ СОСТОЯНИЕ С ПОЛНОЙ ИНФОРМАЦИЕЙ О ЗАКАЗЕ
+                FUNPAY_STATES[state_key] = {
+                    "state": "waiting_for_username",
+                    "data": {
+                        "order_id": order_id,
+                        "chat_id": message.chat_id,
+                        "stars_count": total_stars
+                    }
+                }
+                
+                logger.info(f"{LOGGER_PREFIX} ✅ Заказ #{order_id} готов - ожидаю username")
+                return
             
             except Exception as e:
-                logger.error(f"{LOGGER_PREFIX} Ошибка при получении информации о заказе #{order_id}: {e}")
-            return
-
-    # Проверка статуса заказа
-    if state and state.get("data", {}).get("order_id"):
-        order_id = state["data"]["order_id"]
-        try:
-            order = cardinal.account.get_order(order_id)
-            if order.status in [OrderStatuses.CLOSED, OrderStatuses.REFUNDED]:
-                FUNPAY_STATES.pop(state_key, None)
+                logger.error(f"{LOGGER_PREFIX} ❌ Ошибка при получении заказа #{order_id}: {e}")
                 return
-        except Exception as e:
-            logger.error(f"{LOGGER_PREFIX} Ошибка проверки статуса заказа #{order_id}: {e}")
-            FUNPAY_STATES.pop(state_key, None)
-            return
 
-    # Ожидание username
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ОЖИДАНИЕ USERNAME
+    # ═══════════════════════════════════════════════════════════════════════════
     if state and state["state"] == "waiting_for_username":
         username = message.text.strip()
         order_id = state["data"]["order_id"]
@@ -286,6 +305,7 @@ def handle_new_message(cardinal, event: NewMessageEvent, *args):
             cardinal.account.send_message(message.chat_id, "❌ Отправьте username")
             return
 
+        # Запрашиваем подтверждение
         cardinal.account.send_message(
             message.chat_id,
             f"• Проверьте данные:\nL Username: {username}\nL Количество звёзд: {stars_count}\n\n"
@@ -297,54 +317,50 @@ def handle_new_message(cardinal, event: NewMessageEvent, *args):
             "data": {
                 "username": username,
                 "order_id": order_id,
-                "stars_count": stars_count
+                "stars_count": stars_count,
+                "chat_id": message.chat_id
             }
         }
         return
 
-    # Подтверждение username
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ПОДТВЕРЖДЕНИЕ USERNAME
+    # ═══════════════════════════════════════════════════════════════════════════
     if state and state["state"] == "confirming_username":
         order_id = state["data"]["order_id"]
-        
-        try:
-            order = cardinal.account.get_order(order_id)
-            if order.status in [OrderStatuses.CLOSED, OrderStatuses.REFUNDED]:
-                FUNPAY_STATES.pop(state_key, None)
-                return
-        except:
-            pass
-
         response = message.text.strip().lower()
 
         if response in ["+", "да", "yes", "верно", "confirm"]:
+            # ПОДТВЕРЖДЕНО - НАЧИНАЕМ ОТПРАВКУ
             username = state["data"]["username"]
             stars_count = state["data"]["stars_count"]
+            chat_id = state["data"]["chat_id"]
             
-            queue_size = USER_ORDER_QUEUES.get(message.author_id, Queue()).qsize() + 1
-            wait_time = int(queue_size * 15)
+            cardinal.account.send_message(chat_id, f"🚀 Начинаю отправку {stars_count} звёзд...")
             
-            cardinal.account.send_message(
-                message.chat_id,
-                f"⏳ Ваш запрос на отправку звёзд добавлен в очередь.\n"
-                f"L Ваша позиция: {queue_size}.\n"
-                f"L Примерное время ожидания: {wait_time} сек."
-            )
+            logger.info(f"{LOGGER_PREFIX} 📤 Начинаю отправку заказа #{order_id}")
+            logger.info(f"{LOGGER_PREFIX} Username: {username} | Звёзды: {stars_count}")
             
-            logger.info(f"{LOGGER_PREFIX} Начинаю отправку звёзд для заказа #{order_id}")
+            # Выполняем отправку
+            asyncio.run(send_stars_gifts(cardinal, username, stars_count, chat_id, order_id))
             
-            perform_stars_delivery(cardinal, order_id, username, stars_count, message.chat_id, message.author_id)
+            logger.info(f"{LOGGER_PREFIX} ✅ Заказ #{order_id} завершён!")
+            FUNPAY_STATES.pop(state_key, None)
         
         elif response in ["-", "нет", "no"]:
+            # ОТМЕНЕНО - ЗАПРАШИВАЕМ НОВЫЙ USERNAME
             FUNPAY_STATES[state_key] = {
                 "state": "waiting_for_username",
                 "data": {
                     "order_id": order_id,
-                    "stars_count": state["data"]["stars_count"]
+                    "stars_count": state["data"]["stars_count"],
+                    "chat_id": state["data"]["chat_id"]
                 }
             }
-            cardinal.account.send_message(message.chat_id, "FPC: введите корректный username")
+            cardinal.account.send_message(message.chat_id, "🔄 Введите корректный username")
         
         else:
+            # НОВЫЙ USERNAME
             new_username = message.text.strip()
             cardinal.account.send_message(
                 message.chat_id,
@@ -357,96 +373,10 @@ def handle_new_message(cardinal, event: NewMessageEvent, *args):
                 "data": {
                     "username": new_username,
                     "order_id": order_id,
-                    "stars_count": state["data"]["stars_count"]
+                    "stars_count": state["data"]["stars_count"],
+                    "chat_id": state["data"]["chat_id"]
                 }
             }
-
-def perform_stars_delivery(cardinal, order_id: str, username: str, stars_count: int, chat_id: int, author_id: int):
-    """Выполнение отправки звёзд"""
-    state_key = (chat_id, author_id)
-    
-    try:
-        order = cardinal.account.get_order(order_id)
-        if order.status in [OrderStatuses.CLOSED, OrderStatuses.REFUNDED]:
-            FUNPAY_STATES.pop(state_key, None)
-            return
-        
-        cardinal.account.send_message(chat_id, f"🚀 Начинаю отправку {stars_count} звёзд...")
-        
-        asyncio.run(send_stars_gifts(cardinal, username, stars_count, chat_id, order_id))
-        
-        logger.info(f"{LOGGER_PREFIX} ✅ Заказ #{order_id} успешно выполнен!")
-        
-    except Exception as e:
-        error_msg = str(e)
-        cardinal.account.send_message(chat_id, f"❌ Произошла ошибка при выполнении вашего заказа: {error_msg}")
-        logger.error(f"{LOGGER_PREFIX} Ошибка выполнения заказа #{order_id}: {error_msg}")
-    
-    finally:
-        FUNPAY_STATES.pop(state_key, None)
-
-def process_order(cardinal, order_id: str, chat_id: int, buyer_id: int):
-    """Обработка заказа"""
-    time.sleep(3)
-    
-    try:
-        order = cardinal.account.get_order(order_id)
-        
-        if order.status in [OrderStatuses.CLOSED, OrderStatuses.REFUNDED]:
-            FUNPAY_STATES.pop((chat_id, buyer_id), None)
-            return
-        
-        lot_id = str(order.lot_id)
-        
-        if lot_id not in LOT_STARS_MAPPING:
-            logger.warning(f"{LOGGER_PREFIX} Лот {lot_id} не найден в маппинге")
-            return
-        
-        stars_per_lot = LOT_STARS_MAPPING[lot_id]
-        amount = order.amount
-        total_stars = stars_per_lot * amount
-        
-        if amount != 1:
-            cardinal.account.send_message(chat_id, f"❌ Вы заказали {amount} лотов ({total_stars} Stars). Заказывайте по одному!")
-            FUNPAY_STATES.pop((chat_id, buyer_id), None)
-            return
-        
-        welcome_msg = (
-            f"✨ Спасибо за заказ {total_stars} Stars!\n\n"
-            f"Для отправки звёзд мне нужен ваш username Telegram.\n"
-            f"Пожалуйста, отправьте его в любом формате:\n"
-            f"• @username\n• username\n• ID пользователя"
-        )
-        
-        cardinal.account.send_message(chat_id, welcome_msg)
-        
-        FUNPAY_STATES[(chat_id, buyer_id)] = {
-            "state": "waiting_for_username",
-            "data": {
-                "order_id": order_id,
-                "stars_count": total_stars
-            }
-        }
-        
-        logger.info(f"{LOGGER_PREFIX} Запрошен username для заказа #{order_id}")
-    
-    except Exception as e:
-        logger.error(f"{LOGGER_PREFIX} Ошибка обработки заказа #{order_id}: {e}")
-        FUNPAY_STATES.pop((chat_id, buyer_id), None)
-
-def process_user_orders(cardinal, buyer_id: int):
-    """Обработка очереди заказов"""
-    if buyer_id not in USER_ORDER_QUEUES:
-        return
-    
-    queue = USER_ORDER_QUEUES[buyer_id]
-    
-    while not queue.empty():
-        order_data = queue.get()
-        process_order(cardinal, order_data["order_id"], order_data["chat_id"], buyer_id)
-        queue.task_done()
-    
-    del USER_ORDER_QUEUES[buyer_id]
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TELEGRAM ПАНЕЛЬ (4 КНОПКИ)
@@ -500,7 +430,6 @@ def setup_simple_callbacks(cardinal):
 • API ID: {api_status}
 • API HASH: {'✅ Установлен' if config.get('pyrogram', {}).get('api_hash') else '❌ Не установлен'}
 • Лотов настроено: {lots}
-• Заказов в очереди: {sum(q.qsize() for q in USER_ORDER_QUEUES.values())}
 """
         cardinal.telegram.bot.send_message(call.message.chat.id, info, parse_mode="HTML")
     
@@ -705,6 +634,9 @@ def init_plugin(cardinal):
     
     logger.info(f"{LOGGER_PREFIX} ✅ Плагин загружен")
 
+# ═══════════════════════════════════════════════════════════════════════════
+# BIND POINTS (ОБЯЗАТЕЛЬНО)
+# ═══════════════════════════════════════════════════════════════════════════
 
 BIND_TO_PRE_INIT = [init_plugin]
 BIND_TO_NEW_MESSAGE = [handle_new_message]
